@@ -823,6 +823,17 @@ LYRICS_WHISPER_MODEL_DIR = os.environ.get(
     "LYRICS_WHISPER_MODEL_DIR",
     os.path.join(LYRICS_MODEL_DIR, "whisper-small-onnx"),
 )
+# Optional: transcribe via an external OpenAI-compatible /v1/audio/transcriptions
+# endpoint (e.g. a self-hosted faster-whisper-server/speaches instance) instead of
+# the bundled local ONNX pipeline. Same OPENAI_*-style naming as the playlist-AI
+# settings above. Leave LYRICS_WHISPER_API_URL empty (the default) to keep using
+# the local model - this is purely additive, existing deployments are unaffected.
+# See lyrics/whisper_onnx.py's module docstring for exactly what is and isn't
+# preserved on the remote path (notably: no local avg_logprob hallucination gate
+# unless the remote server's response includes per-segment logprobs).
+LYRICS_WHISPER_API_URL = os.environ.get("LYRICS_WHISPER_API_URL", "")
+LYRICS_WHISPER_API_MODEL = os.environ.get("LYRICS_WHISPER_API_MODEL", "Systran/faster-whisper-small")
+LYRICS_WHISPER_API_KEY = os.environ.get("LYRICS_WHISPER_API_KEY", "no-key-needed")
 LYRICS_MAX_SONGS_TO_ANALYZE = 1000
 LYRICS_SUPPORTED_AUDIO_EXTENSIONS = {
     '.wav', '.mp3', '.m4a', '.flac', '.ogg', '.opus', '.aac', '.aiff', '.aif', '.mp4'
