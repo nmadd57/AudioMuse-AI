@@ -18,9 +18,9 @@ mistralai>=1.11.1,<2.0.0
 umap-learn
 av==13.1.0
 psutil
-PyJWT==2.12.1
+PyJWT==2.13.0
 argon2-cffi==25.1.0
-onnx==1.14.1
+onnx==1.22.0
 resampy
 librosa==0.11.0
 mutagen==1.47.0
@@ -30,7 +30,7 @@ protobuf
 sympy
 mcp
 httpx
-transformers==4.57.6
+transformers==5.5.0
 huggingface-hub==0.36.2
 tokenizers>=0.20.0
 stopwords==1.0.2
