@@ -6,7 +6,7 @@
 # the terms of the GNU Affero General Public License v3.0. See the LICENSE file
 # in the project root or <https://github.com/NeptuneHub/AudioMuse-AI/blob/main/LICENSE>
 
-"""Self-contained ONNX Whisper-small speech-to-text pipeline for lyrics ASR.
+"""Whisper-small speech-to-text pipeline for lyrics ASR, local ONNX or remote.
 
 Implements the whole Whisper inference loop by hand on onnxruntime (encoder plus
 merged decoder with a past-key-values KV cache) so no torch/transformers runtime
@@ -21,19 +21,35 @@ Main Features:
   returning avg_logprob for upstream gating.
 * Lazy thread-safe session load with a minimum-free-RAM guard (raises
   WhisperLoadRefused) plus an unload hook for memory reclaim.
+* Optional remote path (config.LYRICS_WHISPER_API_URL): skips all of the above
+  and POSTs to an external OpenAI-compatible /v1/audio/transcriptions endpoint
+  instead - for hosts where the local GPU is already oversubscribed by other
+  models and Whisper's VRAM/compute would rather run elsewhere entirely. The
+  remote path is NOT a drop-in equal: OpenAI's transcription API has no
+  equivalent of the local pipeline's language-confidence pre-check (so
+  instrumental-detection relies on the remote server returning a short/empty
+  transcript rather than us skipping the call up front) and no standard
+  avg_logprob field (verbose_json responses from faster-whisper-based servers
+  - speaches, faster-whisper-server - do include per-segment avg_logprob, so
+  that's read when present; servers that only return plain segments get a
+  neutral 0.0, which clears every configured LYRICS_ASR_*_MIN_LOGPROB
+  threshold by design, since there is nothing local left to gate on).
 """
 
 from __future__ import annotations
 
+import io
 import logging
 import os
 import threading
 import time
+import wave
 import zlib
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
+import requests
 
 from cpu_budget import usable_cpu_count
 
@@ -741,6 +757,84 @@ class WhisperLoadRefused(RuntimeError):
     pass
 
 
+def _wav_to_pcm16_bytes(wav: np.ndarray, sr: int) -> bytes:
+    pcm16 = np.clip(wav, -1.0, 1.0)
+    pcm16 = (pcm16 * 32767.0).astype(np.int16)
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sr)
+        wf.writeframes(pcm16.tobytes())
+    return buf.getvalue()
+
+
+def _transcribe_remote(
+    wav: np.ndarray, sr: int, language: Optional[str] = None
+) -> Dict[str, object]:
+    # POSTs to an external OpenAI-compatible /v1/audio/transcriptions
+    # endpoint. See the module docstring for exactly what this path does
+    # and doesn't preserve relative to the local pipeline.
+    import config as _cfg
+
+    audio_duration = len(wav) / sr
+    base_url = _cfg.LYRICS_WHISPER_API_URL.rstrip("/")
+    url = base_url if base_url.endswith("/audio/transcriptions") else f"{base_url}/audio/transcriptions"
+
+    headers = {}
+    api_key = getattr(_cfg, "LYRICS_WHISPER_API_KEY", "no-key-needed")
+    if api_key and api_key != "no-key-needed":
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    data = {
+        "model": _cfg.LYRICS_WHISPER_API_MODEL,
+        "response_format": "verbose_json",
+    }
+    if language:
+        data["language"] = language
+
+    wav_bytes = _wav_to_pcm16_bytes(wav.astype(np.float32), sr)
+    files = {"file": ("audio.wav", wav_bytes, "audio/wav")}
+
+    t0 = time.time()
+    try:
+        resp = requests.post(url, headers=headers, data=data, files=files, timeout=120)
+        resp.raise_for_status()
+        payload = resp.json()
+    except Exception as exc:
+        logger.warning("Whisper remote transcription failed (%s): %s", url, exc)
+        return {
+            "text": "",
+            "language": language or "",
+            "duration": audio_duration,
+            "avg_logprob": float('-inf'),
+        }
+
+    text = (payload.get("text") or "").strip()
+    detected_language = payload.get("language") or language or ""
+    segments = payload.get("segments") or []
+    seg_logprobs = [s["avg_logprob"] for s in segments if isinstance(s, dict) and "avg_logprob" in s]
+    avg_logprob = float(np.mean(seg_logprobs)) if seg_logprobs else 0.0
+
+    elapsed = time.time() - t0
+    logger.info(
+        "Whisper-small (remote): %.1fs audio in %.1fs, lang=%r, "
+        "avg_logprob=%s (from %d segment(s)) -> %d chars",
+        audio_duration,
+        elapsed,
+        detected_language,
+        f"{avg_logprob:.3f}" if seg_logprobs else "n/a, defaulted 0.0",
+        len(segments),
+        len(text),
+    )
+    return {
+        "text": text,
+        "language": detected_language,
+        "duration": audio_duration,
+        "avg_logprob": avg_logprob,
+    }
+
+
 def load_whisper_model() -> _OnnxWhisperPipeline:
     global _pipeline, _pipeline_dir
     try:
@@ -767,6 +861,15 @@ def load_whisper_model() -> _OnnxWhisperPipeline:
 def transcribe(
     wav: np.ndarray, sr: int, language: Optional[str] = None
 ) -> Dict[str, object]:
+    try:
+        import config as _cfg
+
+        remote_url = _cfg.LYRICS_WHISPER_API_URL
+    except Exception:
+        remote_url = ""
+    if remote_url:
+        return _transcribe_remote(wav, sr, language=language)
+
     if sr != SAMPLE_RATE:
         import librosa
 

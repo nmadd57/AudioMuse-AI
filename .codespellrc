@@ -13,6 +13,8 @@
 #   caf         -> test-fixture strings in test/unit (not "calf")
 #   embbeding   -> part of the real filename query/read_bytea_embbeding.sql referenced in a comment
 #   acapella    -> deliberate user-query spelling variant matched in _VOCALNESS_RE (tasks/ai/planner.py), alongside "a cappella"
-ignore-words-list = idel,re-uses,nd,datas,embeding,unparseable,caf,embbeding,acapella
+#   speaches    -> real project name (github.com/speaches-ai/speaches, an OpenAI-compatible STT/TTS server), not "speeches"
+#   te          -> the HTTP "TE" (Transfer-Encoding negotiation) header name, lowercased for case-insensitive matching in extras/oidc-session-bridge/shim.py's hop-by-hop header set
+ignore-words-list = idel,re-uses,nd,datas,embeding,unparseable,caf,embbeding,acapella,speaches,te
 # Binary/vendored/generated trees and local caches kept out of the scan.
 skip = .git,*.lock,*.min.js,*.map,*.svg,*.egg-info,.mypy_cache,.pytest_cache,.ruff_cache,model,dist,native-build,.venv,.venv-windows,screenshot,test/songs,static,mood_centroids_real_080_clap.json,genre_subgenre.json
