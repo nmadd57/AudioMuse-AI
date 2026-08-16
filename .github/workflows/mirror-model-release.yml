@@ -1,0 +1,80 @@
+name: Mirror upstream model release
+
+# Forking a repo doesn't copy GitHub Releases, only git history/branches/tags.
+# scripts/standalone/assemble_model.py (used by the Linux/Windows/macOS
+# standalone package builds) downloads model assets via
+# `gh release download $MODEL_RELEASE -R $GITHUB_REPOSITORY` - it resolves to
+# THIS repo, not NeptuneHub/AudioMuse-AI, so those builds fail on a fresh
+# fork with no local copy of the release. (The Docker/NVIDIA image builds are
+# unaffected - the Dockerfiles pull model URLs hardcoded to
+# github.com/NeptuneHub/AudioMuse-AI directly, not the dynamic self-repo.)
+#
+# This checks upstream's latest "*-model" release weekly and mirrors it here
+# under the same tag if we don't already have it. Never overwrites or
+# deletes anything - if the tag already exists on this fork, it's a no-op.
+#
+# NOTE: mirroring a new upstream model release here does NOT by itself make
+# anything use it - MODEL_RELEASE (build-linux.yml/build-windows.yml/
+# build-macos.yml) and the hardcoded v5.0.0-model URLs in Dockerfile/
+# Dockerfile-noavx2 all still need a manual bump to actually point at a new
+# tag. This job only guarantees the asset is *available* here when that bump
+# happens, not that it's in use.
+
+on:
+  schedule:
+    - cron: "0 6 * * 1" # weekly, Monday 06:00 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      UPSTREAM_REPO: NeptuneHub/AudioMuse-AI
+    steps:
+      - name: Find upstream's latest *-model release
+        id: upstream
+        run: |
+          set -euo pipefail
+          TAG=$(gh release list -R "$UPSTREAM_REPO" --json tagName,isDraft,isPrerelease \
+            --jq '[.[] | select(.isDraft == false and .isPrerelease == false and (.tagName | endswith("-model")))] | .[0].tagName')
+          if [ -z "$TAG" ] || [ "$TAG" = "null" ]; then
+            echo "::error::No *-model release found on $UPSTREAM_REPO"
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Latest upstream model release: $TAG"
+
+      - name: Check if we already have it
+        id: check
+        run: |
+          set -euo pipefail
+          if gh release view "${{ steps.upstream.outputs.tag }}" -R "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "already_mirrored=true" >> "$GITHUB_OUTPUT"
+            echo "${{ steps.upstream.outputs.tag }} is already mirrored here - nothing to do."
+          else
+            echo "already_mirrored=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download upstream release assets
+        if: steps.check.outputs.already_mirrored == 'false'
+        run: |
+          set -euo pipefail
+          mkdir -p assets
+          gh release download "${{ steps.upstream.outputs.tag }}" -R "$UPSTREAM_REPO" -D assets
+          echo "Downloaded:"
+          ls -lh assets
+
+      - name: Mirror as a new release on this fork
+        if: steps.check.outputs.already_mirrored == 'false'
+        run: |
+          set -euo pipefail
+          gh release create "${{ steps.upstream.outputs.tag }}" \
+            -R "${{ github.repository }}" \
+            --title "Model ${{ steps.upstream.outputs.tag }} (mirrored from $UPSTREAM_REPO)" \
+            --notes "Mirrored verbatim from $UPSTREAM_REPO's ${{ steps.upstream.outputs.tag }} release by the mirror-model-release workflow. Remember: MODEL_RELEASE in build-linux.yml/build-windows.yml/build-macos.yml and the hardcoded URLs in Dockerfile/Dockerfile-noavx2 still need a manual bump to actually use this if it's a new version." \
+            assets/*
+          echo "::notice::Mirrored ${{ steps.upstream.outputs.tag }} - remember to bump MODEL_RELEASE/Dockerfile refs if this is a new version, not a re-run of the existing one."
