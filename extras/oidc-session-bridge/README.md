@@ -85,7 +85,7 @@ bridge's proxied request headers directly rather than assuming.
 | Env var | Required | Default | Meaning |
 |---|---|---|---|
 | `UPSTREAM_URL` | yes | - | Base URL of the real app, e.g. `http://app:8000` |
-| `JWT_SECRET` | yes | - | HS256 signing secret, shared with the app |
+| `SESSION_JWT_SECRET` | yes | - | HS256 signing secret, shared with the app |
 | `PORT` | no | `8001` | Port the bridge listens on |
 | `IDENTITY_HEADERS` | no | `X-Forwarded-Email,X-Forwarded-Preferred-Username,X-Forwarded-User` | Comma list, checked in order, first present wins |
 | `GROUPS_HEADER` | no | `X-Forwarded-Groups` | Header carrying comma-separated group membership |
@@ -103,8 +103,8 @@ bridge's proxied request headers directly rather than assuming.
 | `PROVISION_PATH` | no | `/api/users` | Path appended to `UPSTREAM_URL` |
 | `PROVISION_BODY_TEMPLATE` | no | `{"username": "{username}", "password": "{password}", "role": "{role}"}` | `{username}`/`{role}`/`{password}` are substituted; `{password}` is a fresh random value nobody needs to know |
 | `PROVISION_AUTH_HEADER_NAME` | no | `Authorization` | Header name for the provisioning call's own auth |
-| `PROVISION_AUTH_HEADER_VALUE_TEMPLATE` | no | `Bearer {api_token}` | `{api_token}` substituted from `API_TOKEN` |
-| `API_TOKEN` | no | (empty) | Value substituted into the auth header template |
+| `PROVISION_AUTH_HEADER_VALUE_TEMPLATE` | no | `Bearer {api_token}` | `{api_token}` substituted from `PROVISION_API_TOKEN` |
+| `PROVISION_API_TOKEN` | no | (empty) | Value substituted into the auth header template. Named `PROVISION_*`, not `API_TOKEN`, so it can never collide with an env var a target app's own config already owns |
 | `PROVISION_TIMEOUT_SECONDS` | no | `5` | Timeout for the provisioning HTTP call |
 | `PROVISION_SUCCESS_STATUSES` | no | `200,201,204,400,409,422` | Comma list of status codes treated as "provisioned or already exists" - verify against your app's actual response |
 
@@ -125,8 +125,8 @@ harmless, not load-bearing).
 
 ```
 UPSTREAM_URL=http://flask:8000
-JWT_SECRET=<shared with AudioMuse-AI's own JWT_SECRET env var>
-API_TOKEN=<shared with AudioMuse-AI's own API_TOKEN env var - grants admin-equivalent Bearer access for provisioning>
+SESSION_JWT_SECRET=<shared with AudioMuse-AI's own JWT_SECRET env var>
+PROVISION_API_TOKEN=<shared with AudioMuse-AI's own API_TOKEN env var - grants admin-equivalent Bearer access for provisioning>
 COOKIE_NAME=audiomuse_jwt
 JWT_SUB_CLAIM=sub
 JWT_ROLE_CLAIM=role
@@ -150,7 +150,7 @@ silently authenticated:
 1. Check the identity header actually arrives at the bridge - log
    `self.headers` in `_proxy()` temporarily, or check your proxy's own
    request logs for what it's forwarding.
-2. Confirm `JWT_SECRET` matches the app's *actual* configured secret, not
+2. Confirm `SESSION_JWT_SECRET` matches the app's *actual* configured secret, not
    just what you think you set - a mismatch fails signature verification
    silently from the bridge's point of view (it doesn't get a response back
    saying "bad signature," the app just doesn't recognize the session).

@@ -1,4 +1,12 @@
 #!/usr/bin/env python3
+# AudioMuse-AI - https://github.com/NeptuneHub/AudioMuse-AI
+# Copyright (C) 2025 NeptuneHub
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# This program is free software: you can redistribute it and/or modify it under
+# the terms of the GNU Affero General Public License v3.0. See the LICENSE file
+# in the project root or <https://github.com/NeptuneHub/AudioMuse-AI/blob/main/LICENSE>
+
 """Generic auth bridge: mints a signed session cookie from an OIDC forward-auth
 proxy's identity headers and reverse-proxies to the real app.
 
@@ -15,20 +23,7 @@ This sits behind a forward-auth proxy (oauth2-proxy, Authelia, Authentik,
 etc.) that has already verified the human against your OIDC provider of
 choice and forwards identity as a header on the proxied request - which
 one depends entirely on how you configured that proxy, not on which OIDC
-server issued the original login. For every request that carries an
-identity header, the shim:
-
-  1. Optionally auto-provisions a user for that identity in the target app
-     (an HTTP call - method/path/body/auth header/success-codes are all
-     configurable) so distinct proxy-authenticated identities get distinct
-     app accounts instead of everyone sharing one login. Disable entirely
-     with PROVISION_ENABLED=false for apps that provision users some other
-     way.
-  2. Mints a JWT ({SUB_CLAIM: identity, ROLE_CLAIM: role, iat, exp}, HS256,
-     JWT_SECRET) and injects it as a cookie named COOKIE_NAME on the
-     proxied request.
-  3. Proxies the request through to UPSTREAM_URL, which sees an ordinary
-     valid session and never knows the shim exists.
+server issued the original login.
 
 IMPORTANT - read before deploying: this only works if you have verified,
 by inspecting the actual target app's auth code, three specific things:
@@ -47,16 +42,26 @@ Get any of these wrong and you get silent auth bypass or silent breakage,
 not a helpful error. AudioMuse-AI's own values are documented in
 README.md in this directory as a worked example.
 
-Deliberately stdlib-only (no pip install at container start, no build
-step) - HS256 signing is ~10 lines of hmac+base64, not worth a dependency
-for this. Also deliberately has NO in-memory "already provisioned" cache:
-an earlier AudioMuse-AI-specific version of this had one, and it went
-stale the moment a user's app-side row was deleted out-of-band (manual
-cleanup, role fix, etc) - the shim kept assuming the user still existed,
-cookies kept minting for an identity that resolved to nothing, and the
-app correctly bounced every request back to its own login. The
-provisioning call is meant to be a cheap idempotent upsert, so just
-making it every request is the correct default.
+Main Features:
+* For every request carrying a configured identity header: optionally
+  auto-provisions a user for that identity in the target app (an HTTP call
+  - method/path/body/auth header/success-codes are all configurable, or
+  skip entirely with PROVISION_ENABLED=false), mints a JWT ({SUB_CLAIM:
+  identity, ROLE_CLAIM: role, iat, exp}, HS256, SESSION_JWT_SECRET) and
+  injects it as a cookie named COOKIE_NAME on the proxied request, then
+  forwards the request to UPSTREAM_URL - which sees an ordinary valid
+  session and never knows the shim exists.
+* Deliberately stdlib-only (no pip install at container start, no build
+  step) - HS256 signing is ~10 lines of hmac+base64, not worth a
+  dependency for this.
+* Deliberately has NO in-memory "already provisioned" cache: an earlier
+  AudioMuse-AI-specific version of this had one, and it went stale the
+  moment a user's app-side row was deleted out-of-band (manual cleanup,
+  role fix, etc) - the shim kept assuming the user still existed, cookies
+  kept minting for an identity that resolved to nothing, and the app
+  correctly bounced every request back to its own login. The provisioning
+  call is meant to be a cheap idempotent upsert, so just making it every
+  request is the correct default.
 """
 
 import base64
@@ -69,79 +74,107 @@ import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-# --- Core wiring -------------------------------------------------------
+# All config below is read from the environment inside load_config(), called
+# from __main__ - not at module import time. Every name here is only ever
+# read (never written) outside load_config(), so declaring them as plain
+# module globals and populating them via `global` there is enough; nothing
+# in this module executes at import time beyond class/def statements, so a
+# bare `import shim` works without any env vars set (required for
+# test/unit/test_import_smoke.py's blanket importability check).
+UPSTREAM_URL = SESSION_JWT_SECRET = PORT = None
+IDENTITY_HEADERS = GROUPS_HEADER = None
+DEFAULT_ROLE = ADMIN_ROLE = ADMIN_USERS = ADMIN_GROUPS = None
+COOKIE_NAME = COOKIE_PATH = JWT_SUB_CLAIM = JWT_ROLE_CLAIM = JWT_EXPIRY_SECONDS = None
+PROVISION_ENABLED = PROVISION_METHOD = PROVISION_PATH = PROVISION_TIMEOUT_SECONDS = None
+PROVISION_BODY_TEMPLATE = PROVISION_AUTH_HEADER_NAME = PROVISION_AUTH_HEADER_VALUE_TEMPLATE = None
+PROVISION_API_TOKEN = PROVISION_SUCCESS_STATUSES = None
 
-UPSTREAM_URL = os.environ["UPSTREAM_URL"].rstrip("/")
-JWT_SECRET = os.environ["JWT_SECRET"]
-PORT = int(os.environ.get("PORT", "8001"))
 
-# --- Identity headers (set by your forward-auth proxy, not by the OIDC
-# server directly - check your proxy's docs for what it actually forwards
-# to the upstream request, which is often NOT the same header family it
-# uses for e.g. nginx auth_request responses. This bit oauth2-proxy users
-# once already: --set-xauthrequest only decorates an auth_request
-# subrequest response, never the proxied request itself.) ---------------
+def load_config() -> None:
+    global UPSTREAM_URL, SESSION_JWT_SECRET, PORT, IDENTITY_HEADERS, GROUPS_HEADER
+    global DEFAULT_ROLE, ADMIN_ROLE, ADMIN_USERS, ADMIN_GROUPS
+    global COOKIE_NAME, COOKIE_PATH, JWT_SUB_CLAIM, JWT_ROLE_CLAIM, JWT_EXPIRY_SECONDS
+    global PROVISION_ENABLED, PROVISION_METHOD, PROVISION_PATH, PROVISION_TIMEOUT_SECONDS
+    global PROVISION_BODY_TEMPLATE, PROVISION_AUTH_HEADER_NAME, PROVISION_AUTH_HEADER_VALUE_TEMPLATE
+    global PROVISION_API_TOKEN, PROVISION_SUCCESS_STATUSES
 
-IDENTITY_HEADERS = tuple(
-    h.strip()
-    for h in os.environ.get(
-        "IDENTITY_HEADERS", "X-Forwarded-Email,X-Forwarded-Preferred-Username,X-Forwarded-User"
-    ).split(",")
-    if h.strip()
-)
-GROUPS_HEADER = os.environ.get("GROUPS_HEADER", "X-Forwarded-Groups")
+    # --- Core wiring ---
+    UPSTREAM_URL = os.environ["UPSTREAM_URL"].rstrip("/")
+    SESSION_JWT_SECRET = os.environ["SESSION_JWT_SECRET"]
+    PORT = int(os.environ.get("PORT", "8001"))
 
-# --- Role assignment (only takes effect when provisioning a brand-new
-# user - see the module docstring's point (a) for why role changes to an
-# already-provisioned identity may not retroactively apply; that's a
-# property of the target app, this shim can't fix it generically) -------
+    # --- Identity headers (set by your forward-auth proxy, not by the OIDC
+    # server directly - check your proxy's docs for what it actually
+    # forwards to the upstream request, which is often NOT the same header
+    # family it uses for e.g. nginx auth_request responses. This bit
+    # oauth2-proxy users once already: --set-xauthrequest only decorates an
+    # auth_request subrequest response, never the proxied request itself.)
+    IDENTITY_HEADERS = tuple(
+        h.strip()
+        for h in os.environ.get(
+            "IDENTITY_HEADERS",
+            "X-Forwarded-Email,X-Forwarded-Preferred-Username,X-Forwarded-User",
+        ).split(",")
+        if h.strip()
+    )
+    GROUPS_HEADER = os.environ.get("GROUPS_HEADER", "X-Forwarded-Groups")
 
-DEFAULT_ROLE = os.environ.get("DEFAULT_ROLE", "user")
-ADMIN_ROLE = os.environ.get("ADMIN_ROLE", "admin")
-ADMIN_USERS = {
-    u.strip().lower() for u in os.environ.get("ADMIN_USERS", "").split(",") if u.strip()
-}
-ADMIN_GROUPS = {
-    g.strip().lower() for g in os.environ.get("ADMIN_GROUPS", "").split(",") if g.strip()
-}
+    # --- Role assignment (only takes effect when provisioning a brand-new
+    # user - see the module docstring's point (a) for why role changes to
+    # an already-provisioned identity may not retroactively apply; that's a
+    # property of the target app, this shim can't fix it generically) ---
+    DEFAULT_ROLE = os.environ.get("DEFAULT_ROLE", "user")
+    ADMIN_ROLE = os.environ.get("ADMIN_ROLE", "admin")
+    ADMIN_USERS = {
+        u.strip().lower() for u in os.environ.get("ADMIN_USERS", "").split(",") if u.strip()
+    }
+    ADMIN_GROUPS = {
+        g.strip().lower() for g in os.environ.get("ADMIN_GROUPS", "").split(",") if g.strip()
+    }
 
-# --- JWT shape -----------------------------------------------------------
+    # --- JWT shape ---
+    COOKIE_NAME = os.environ.get("COOKIE_NAME", "session_jwt")
+    COOKIE_PATH = os.environ.get("COOKIE_PATH", "/")
+    JWT_SUB_CLAIM = os.environ.get("JWT_SUB_CLAIM", "sub")
+    JWT_ROLE_CLAIM = os.environ.get("JWT_ROLE_CLAIM", "role")  # "" omits role from the JWT
+    JWT_EXPIRY_SECONDS = int(os.environ.get("JWT_EXPIRY_SECONDS", str(8 * 3600)))
 
-COOKIE_NAME = os.environ.get("COOKIE_NAME", "session_jwt")
-COOKIE_PATH = os.environ.get("COOKIE_PATH", "/")
-JWT_SUB_CLAIM = os.environ.get("JWT_SUB_CLAIM", "sub")
-JWT_ROLE_CLAIM = os.environ.get("JWT_ROLE_CLAIM", "role")  # set "" to omit role from the JWT entirely
-JWT_EXPIRY_SECONDS = int(os.environ.get("JWT_EXPIRY_SECONDS", str(8 * 3600)))
+    # --- Provisioning (optional) ---
+    PROVISION_ENABLED = os.environ.get("PROVISION_ENABLED", "true").lower() == "true"
+    PROVISION_METHOD = os.environ.get("PROVISION_METHOD", "POST")
+    PROVISION_PATH = os.environ.get("PROVISION_PATH", "/api/users")
+    PROVISION_TIMEOUT_SECONDS = float(os.environ.get("PROVISION_TIMEOUT_SECONDS", "5"))
+    # {username}/{role}/{password} are substituted in. {password} is a
+    # fresh random value on every call - the point of this bridge is that
+    # nobody ever needs to know or use it, the cookie is the only
+    # credential that matters.
+    PROVISION_BODY_TEMPLATE = os.environ.get(
+        "PROVISION_BODY_TEMPLATE",
+        '{"username": "{username}", "password": "{password}", "role": "{role}"}',
+    )
+    PROVISION_AUTH_HEADER_NAME = os.environ.get("PROVISION_AUTH_HEADER_NAME", "Authorization")
+    PROVISION_AUTH_HEADER_VALUE_TEMPLATE = os.environ.get(
+        "PROVISION_AUTH_HEADER_VALUE_TEMPLATE", "Bearer {api_token}"
+    )
+    # Named PROVISION_* (not API_TOKEN) so it can never collide with an
+    # env var a target app's own config already owns - AudioMuse-AI itself
+    # has an API_TOKEN, and this bridge's copy of that value is a distinct
+    # concern (the provisioning call's own credential) even when it happens
+    # to be set to the same value in the worked example.
+    PROVISION_API_TOKEN = os.environ.get("PROVISION_API_TOKEN", "")
+    # Codes to treat as "provisioning succeeded or user already existed" -
+    # every app signals "already exists" differently (400, 409, 422...) and
+    # getting this wrong means every returning user's request pays for one
+    # failed provisioning call. Check your target app's actual response
+    # code for a duplicate-user create before deploying.
+    PROVISION_SUCCESS_STATUSES = {
+        int(s.strip())
+        for s in os.environ.get(
+            "PROVISION_SUCCESS_STATUSES", "200,201,204,400,409,422"
+        ).split(",")
+        if s.strip()
+    }
 
-# --- Provisioning (optional) --------------------------------------------
-
-PROVISION_ENABLED = os.environ.get("PROVISION_ENABLED", "true").lower() == "true"
-PROVISION_METHOD = os.environ.get("PROVISION_METHOD", "POST")
-PROVISION_PATH = os.environ.get("PROVISION_PATH", "/api/users")
-PROVISION_TIMEOUT_SECONDS = float(os.environ.get("PROVISION_TIMEOUT_SECONDS", "5"))
-# {username}/{role}/{password} are substituted in. {password} is a fresh
-# random value on every call - the point of this bridge is that nobody
-# ever needs to know or use it, the cookie is the only credential that
-# matters.
-PROVISION_BODY_TEMPLATE = os.environ.get(
-    "PROVISION_BODY_TEMPLATE",
-    '{"username": "{username}", "password": "{password}", "role": "{role}"}',
-)
-PROVISION_AUTH_HEADER_NAME = os.environ.get("PROVISION_AUTH_HEADER_NAME", "Authorization")
-PROVISION_AUTH_HEADER_VALUE_TEMPLATE = os.environ.get(
-    "PROVISION_AUTH_HEADER_VALUE_TEMPLATE", "Bearer {api_token}"
-)
-API_TOKEN = os.environ.get("API_TOKEN", "")
-# Codes to treat as "provisioning succeeded or user already existed" -
-# every app signals "already exists" differently (400, 409, 422...) and
-# getting this wrong means every returning user's request pays for one
-# failed provisioning call. Check your target app's actual response code
-# for a duplicate-user create before deploying.
-PROVISION_SUCCESS_STATUSES = {
-    int(s.strip())
-    for s in os.environ.get("PROVISION_SUCCESS_STATUSES", "200,201,204,400,409,422").split(",")
-    if s.strip()
-}
 
 HOP_BY_HOP = {
     "connection",
@@ -168,7 +201,7 @@ def mint_jwt(username: str, role: str) -> str:
         payload_obj[JWT_ROLE_CLAIM] = role
     payload = _b64url(json.dumps(payload_obj, separators=(",", ":")).encode())
     signing_input = header + b"." + payload
-    sig = _b64url(hmac.new(JWT_SECRET.encode(), signing_input, hashlib.sha256).digest())
+    sig = _b64url(hmac.new(SESSION_JWT_SECRET.encode(), signing_input, hashlib.sha256).digest())
     return (signing_input + b"." + sig).decode()
 
 
@@ -187,7 +220,7 @@ def ensure_user(username: str, role: str) -> None:
     headers = {"Content-Type": "application/json"}
     if PROVISION_AUTH_HEADER_NAME:
         headers[PROVISION_AUTH_HEADER_NAME] = PROVISION_AUTH_HEADER_VALUE_TEMPLATE.format(
-            api_token=API_TOKEN
+            api_token=PROVISION_API_TOKEN
         )
     req = urllib.request.Request(
         f"{UPSTREAM_URL}{PROVISION_PATH}", data=body, method=PROVISION_METHOD, headers=headers
@@ -267,4 +300,5 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    load_config()
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()

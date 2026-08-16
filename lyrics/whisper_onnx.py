@@ -758,7 +758,6 @@ class WhisperLoadRefused(RuntimeError):
 
 
 def _wav_to_pcm16_bytes(wav: np.ndarray, sr: int) -> bytes:
-    """Encode a float32 [-1, 1] mono waveform as PCM16 WAV bytes for upload."""
     pcm16 = np.clip(wav, -1.0, 1.0)
     pcm16 = (pcm16 * 32767.0).astype(np.int16)
     buf = io.BytesIO()
@@ -773,11 +772,9 @@ def _wav_to_pcm16_bytes(wav: np.ndarray, sr: int) -> bytes:
 def _transcribe_remote(
     wav: np.ndarray, sr: int, language: Optional[str] = None
 ) -> Dict[str, object]:
-    """POST to an external OpenAI-compatible /v1/audio/transcriptions endpoint.
-
-    See the module docstring for exactly what this path does and doesn't
-    preserve relative to the local pipeline.
-    """
+    # POSTs to an external OpenAI-compatible /v1/audio/transcriptions
+    # endpoint. See the module docstring for exactly what this path does
+    # and doesn't preserve relative to the local pipeline.
     import config as _cfg
 
     audio_duration = len(wav) / sr
