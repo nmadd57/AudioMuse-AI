@@ -4,7 +4,7 @@ updates:
     directory: "/.github/dependabot/cpu"
     schedule:
       interval: "weekly"
-    open-pull-requests-limit: 0
+    open-pull-requests-limit: 10
     groups:
       cpu-requirements:
         patterns:
@@ -13,7 +13,7 @@ updates:
     directory: "/.github/dependabot/nvidia"
     schedule:
       interval: "weekly"
-    open-pull-requests-limit: 0
+    open-pull-requests-limit: 10
     groups:
       nvidia-requirements:
         patterns:
@@ -22,7 +22,7 @@ updates:
     directory: "/test"
     schedule:
       interval: "weekly"
-    open-pull-requests-limit: 0
+    open-pull-requests-limit: 10
     groups:
       test-requirements:
         patterns:
@@ -31,8 +31,26 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
-    open-pull-requests-limit: 0
+    open-pull-requests-limit: 10
     groups:
       github-actions:
+        patterns:
+          - "*"
+  # Not present upstream. Tracks the two Dockerfiles' hardcoded FROM lines
+  # (ubuntu:24.04 / ubuntu:22.04 base+models stages). Does NOT catch the
+  # nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04 base actually used for the
+  # -nvidia build variant - that's passed in via --build-arg BASE_IMAGE in
+  # .github/workflows/build-nvidia.yml, not hardcoded in either Dockerfile,
+  # and Dependabot's docker ecosystem only resolves literal FROM/ARG default
+  # values, not externally-supplied build-args. Bump that CUDA base tag by
+  # hand when needed (check https://gitlab.com/nvidia/container-images/cuda
+  # for current cudnn-runtime tags).
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    groups:
+      docker-base-images:
         patterns:
           - "*"
